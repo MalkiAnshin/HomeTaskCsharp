@@ -1,220 +1,138 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Net.Http;
-using System.Text.Json;
-using System.Globalization;
+using CsvHelper.Configuration;
 using CsvHelper;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
 using System.Threading.Tasks;
+using System.IO; 
 
 class Program
 {
+    private static readonly string[] SourceUrls = new string[]
+    {
+        "https://randomuser.me/api/",
+        "https://jsonplaceholder.typicode.com/users",
+        "https://dummyjson.com/users",
+        "https://reqres.in/api/users"
+    };
+
     static async Task Main()
     {
-        using var httpClient = new HttpClient();
-        List<string> apiResponses = new List<string>();
-        List<User> users = new List<User>();
+        // Prompt the user for input
+        Console.WriteLine("Please enter the path to the folder:");
+        string folderPath = Console.ReadLine();
 
-        var tasks = new List<Task>
+        Console.WriteLine("Please enter the file format (JSON or CSV):");
+        string chosenFormat = Console.ReadLine().ToLower();
+
+        // Check if the chosen format is valid
+        if (chosenFormat == "json" || chosenFormat == "csv")
         {
-            CollectUsersFromApi(httpClient, "https://randomuser.me/api/", users, apiResponses),
-            CollectUsersFromApi(httpClient, "https://jsonplaceholder.typicode.com/users", users, apiResponses),
-            CollectUsersFromApi(httpClient, "https://dummyjson.com/users", users, apiResponses),
-            CollectUsersFromApi(httpClient, "https://reqres.in/api/users", users, apiResponses)
-        };
+            var users = new List<User>();
+            var httpClient = new HttpClient();
+            var tasks = new List<Task<JArray>>();
 
-        await Task.WhenAll(tasks);
-
-        Console.WriteLine("All requests completed.");
-        Console.WriteLine();
-
-        static void PrintUsers(List<User> users)
-        {
-            foreach (var user in users)
+            // Fetch data asynchronously from the specified URLs
+            foreach (var sourceUrl in SourceUrls)
             {
-                Console.WriteLine($"First Name: {user.FirstName}");
-                Console.WriteLine($"Last Name: {user.LastName}");
-                Console.WriteLine($"Email: {user.Email}");
-                Console.WriteLine($"Source ID: {user.SourceId}");
-                Console.WriteLine();
+                tasks.Add(GetDataFromUrlAsync(httpClient, sourceUrl));
             }
-        }
 
-        int totalUsers = users.Count;
-        Console.WriteLine($"Total number of users: {totalUsers}");
+            // Wait for all data fetching tasks to complete
+            await Task.WhenAll(tasks);
 
-        string outputFormat = GetOutputFormat();
-        string outputDirectory = GetOutputDirectory();
-
-        await SaveUsersToFileAsync(users, outputFormat, outputDirectory);
-    }
-
-    static async Task CollectUsersFromApi(HttpClient httpClient, string apiUrl, List<User> users, List<string> apiResponses)
-    {
-        try
-        {
-            string responseText = await httpClient.GetStringAsync(apiUrl);
-            apiResponses.Add(responseText);
-
-            var userResponse = JsonSerializer.Deserialize<UserResponse>(responseText);
-            if (userResponse != null)
+            // Process and aggregate user data from fetched results
+            foreach (var result in tasks.Select(t => t.Result))
             {
-                AddUsersFromApiResults(users, userResponse.Results, apiUrl);
-            }
-            else
-            {
-                Console.WriteLine($"Invalid response format from {apiUrl}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error fetching data from {apiUrl}: {ex.Message}");
-        }
-    }
-
-    static void AddUsersFromApiResults(List<User> users, UserResult[] apiResults, string sourceId)
-    {
-        try
-        {
-            foreach (var user in apiResults)
-            {
-                if (user != null && user.Name != null && user.Email != null)
+                foreach (JObject item in result)
                 {
-                    Console.WriteLine($"User Information from {sourceId}:");
-                    Console.WriteLine($"Name: {user.Name?.First} {user.Name?.Last}");
-                    Console.WriteLine($"Email: {user.Email}");
-                    Console.WriteLine();
+                    users.Add(ProcessUserObject(item));
+                }
+            }
 
-                    bool isValidName = !string.IsNullOrWhiteSpace(user.Name.First) && !string.IsNullOrWhiteSpace(user.Name.Last);
-
-                    if (isValidName)
+            // Determine the file path based on user input
+            string filePath = Path.Combine(folderPath, $"users.{chosenFormat}");
+            using (var writer = new StreamWriter(filePath))
+            {
+                if (chosenFormat == "json")
+                {
+                    // Write user data as JSON to the file
+                    var json = JArray.FromObject(users);
+                    await writer.WriteAsync(json.ToString());
+                }
+                else if (chosenFormat == "csv")
+                {
+                    // Write user data as CSV to the file
+                    var csvConfig = new CsvConfiguration(new System.Globalization.CultureInfo("en-US"));
+                    using (var csv = new CsvWriter(writer, csvConfig))
                     {
-                        users.Add(CreateUserFromApiResult(user.Name, user.Email, sourceId));
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Skipping user with incomplete name from {sourceId}");
+                        await csv.WriteRecordsAsync(users);
                     }
                 }
-                else
-                {
-                    Console.WriteLine($"Skipping null or incomplete user data from {sourceId}");
-                }
-
-                Console.WriteLine();
             }
 
-            Console.WriteLine($"Users added from {sourceId}: {apiResults.Length}");
+            // Provide user with success message and total user count
+            Console.WriteLine($"Data written successfully to {filePath}");
+            Console.WriteLine($"Total number of users: {users.Count}");
         }
-        catch (Exception ex)
+        else
         {
-            Console.WriteLine($"Error adding users from {sourceId}: {ex}");
+            // Inform the user about an invalid format choice
+            Console.WriteLine("Invalid format choice.");
         }
     }
-    static User CreateUserFromApiResult(UserName name, string email, string sourceId)
+
+    // Fetch data asynchronously from a URL and return as a JArray
+    static async Task<JArray> GetDataFromUrlAsync(HttpClient httpClient, string url)
+    {
+        var jsonData = await httpClient.GetStringAsync(url);
+        var data = JToken.Parse(jsonData);
+
+        if (data is JArray jsonArray)
+        {
+            return jsonArray;
+        }
+        else if (data is JObject jsonObject)
+        {
+            return new JArray { jsonObject };
+        }
+
+        return new JArray();
+    }
+
+    // Extract relevant properties from a user object and create a User instance
+    static User ProcessUserObject(JObject item)
     {
         var user = new User
         {
-            FirstName = GetUserField(name, "first_name", "firstName", "name"),
-            LastName = GetUserField(name, "last_name", "lastName"),
-            Email = email,
-            SourceId = sourceId
+            FirstName = GetPropertyValue(item, new[] { "first_name", "firstName", "name" }),
+            LastName = GetPropertyValue(item, new[] { "last_name", "lastName" }),
+            Email = GetPropertyValue(item, new[] { "email" }),
+            SourceId = GetPropertyValue(item, new[] { "id" })
         };
         return user;
     }
 
-    static string GetUserField(UserName name, params string[] fieldNames)
+    // Retrieve property value from a JObject based on multiple possible property names
+    static string GetPropertyValue(JObject obj, string[] possiblePropertyNames)
     {
-        foreach (var fieldName in fieldNames)
+        foreach (var propName in possiblePropertyNames)
         {
-            var propertyInfo = typeof(UserName).GetProperty(fieldName);
-            var value = propertyInfo?.GetValue(name) as string;
-            if (!string.IsNullOrWhiteSpace(value))
+            if (obj.TryGetValue(propName, StringComparison.OrdinalIgnoreCase, out var value))
             {
-                return value;
+                return value.ToString();
             }
         }
-        return null;
+        return "NULL";
     }
+}
 
-    static string GetOutputFormat()
-    {
-        Console.WriteLine("Enter the output format (JSON or CSV):");
-        string format = Console.ReadLine();
-        if (format.Equals("JSON", StringComparison.OrdinalIgnoreCase) || format.Equals("CSV", StringComparison.OrdinalIgnoreCase))
-        {
-            return format;
-        }
-        else
-        {
-            Console.WriteLine("Invalid output format. Defaulting to JSON.");
-            return "JSON";
-        }
-    }
-
-    static string GetOutputDirectory()
-    {
-        Console.WriteLine("Enter the output directory:");
-        return Console.ReadLine();
-    }
-
-    static async Task SaveUsersToFileAsync(List<User> users, string outputFormat, string outputDirectory)
-    {
-        string outputFilePath = Path.Combine(outputDirectory, $"users.{outputFormat.ToLower()}");
-
-        using (var writer = new StreamWriter(outputFilePath))
-        {
-            if (outputFormat.Equals("JSON", StringComparison.OrdinalIgnoreCase))
-            {
-                string json = JsonSerializer.Serialize(users, new JsonSerializerOptions { WriteIndented = true });
-                await writer.WriteAsync(json);
-            }
-            else if (outputFormat.Equals("CSV", StringComparison.OrdinalIgnoreCase))
-            {
-                using (var csv = new CsvWriter(writer, CultureInfo.InvariantCulture))
-                {
-                    await csv.WriteRecordsAsync(users);
-                }
-            }
-            else
-            {
-                Console.WriteLine("Invalid output format.");
-                return;
-            }
-            await writer.FlushAsync();
-        }
-        int totalUsers = users.Count;
-
-        Console.WriteLine($"Total number of users: {totalUsers}");
-
-        Console.WriteLine($"Data saved to {outputFilePath} ({outputFormat} format)");
-    }
-
-    public class User
-    {
-        public string FirstName { get; set; }
-        public string LastName { get; set; }
-        public string Email { get; set; }
-        public string SourceId { get; set; }
-    }
-
-    public class UserResponse
-    {
-        public UserResult[] Results { get; set; }
-    }
-
-    public class UserResult
-    {
-        public UserName Name { get; set; }
-        public string Email { get; set; }
-    }
-
-    public class UserName
-    {
-        public string First { get; set; }
-        public string Last { get; set; }
-        public string firstName { get; set; }
-        public string lastName { get; set; }
-        public string name { get; set; }
-    }
+// User class to hold user data
+class User
+{
+    public string FirstName { get; set; }
+    public string LastName { get; set; }
+    public string Email { get; set; }
+    public string SourceId { get; set; }
 }
